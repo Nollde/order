@@ -6,8 +6,14 @@ Classes that define unique objects and the index to store them.
 
 
 __all__ = [
-    "UniqueObject", "UniqueObjectIndex", "DuplicateObjectException", "DuplicateNameException",
-    "DuplicateIdException", "uniqueness_context", "unique_tree",
+    "UniqueObject",
+    "UniqueObjectIndex",
+    "UniqueObjectIndexSoft",
+    "DuplicateObjectException",
+    "DuplicateNameException",
+    "DuplicateIdException",
+    "uniqueness_context",
+    "unique_tree",
 ]
 
 import warnings
@@ -41,7 +47,7 @@ class UniqueObjectMeta(type):
         cls = super(UniqueObjectMeta, meta_cls).__new__(meta_cls, class_name, bases, class_dict)
 
         # add an unique object index as an instance cache
-        cls._instances = UniqueObjectIndex(cls=cls)
+        cls._instances = UniqueObjectIndexSoft(cls=cls)
 
         return cls
 
@@ -410,6 +416,21 @@ class UniqueObjectIndex(CopyMixin):
                 ])
             return items
 
+    def check_duplicate(self, name, id, context=None):
+        # use the typed parser to check the passed name and check for duplicates
+        if name in self.names(context=context):
+            if self.soft_checking:
+                DuplicateNameWarning(self, name, context)
+            else:
+                raise DuplicateNameException(self, name, context)
+
+        # use the typed parser to check the passed id, check for duplicates and store it
+        if id in self.ids(context=context):
+            if self.soft_checking:
+                DuplicateIdWarning(self, id, context)
+            else:
+                raise DuplicateIdException(self, id, context)
+
     def add(self, *args, **kwargs):
         """
         Adds a new object to the index for a certain context. When the first *arg* is not an
@@ -427,6 +448,9 @@ class UniqueObjectIndex(CopyMixin):
         else:
             context = kwargs.pop("index_context", None) or self.default_context
             obj = self.cls(*args, **kwargs)
+
+        # check for duplicates
+        self.check_duplicate(obj.name, obj.id, context=context)
 
         # add to the index
         self._indices[context]["names"][obj.name] = obj
@@ -572,6 +596,35 @@ class UniqueObjectIndex(CopyMixin):
                 self.remove(name, context=context_)
 
 
+class UniqueObjectIndexSoft(UniqueObjectIndex):
+    soft_checking = False
+
+    def add(self, *args, **kwargs):
+        # determine the object to add
+        if len(args) == 1 and isinstance(args[0], self.cls):
+            context = kwargs.get("index_context") or kwargs.get("context") or self.default_context
+            obj = args[0]
+        else:
+            context = kwargs.pop("index_context", None) or self.default_context
+            obj = self.cls(*args, **kwargs)
+
+        # check for duplicates
+        self.check_duplicate(obj.name, obj.id, context=context)
+
+        # add to the index
+        # invalidate if name already exists in index
+        if obj.name in self._indices[context]["names"]:
+            self._indices[context]["names"][obj.name] = None
+        else:
+            self._indices[context]["names"][obj.name] = obj
+
+        # invalidate if id already exists in index
+        if obj.name in self._indices[context]["ids"]:
+            self._indices[context]["ids"][obj.id] = None
+        else:
+            self._indices[context]["ids"][obj.id] = obj
+
+        return obj
 class UniqueObject(six.with_metaclass(UniqueObjectMeta, UniqueObject)):
     """
     An unique object defined by a *name* and an *id*. The purpose of this class is to provide a
@@ -721,42 +774,18 @@ class UniqueObject(six.with_metaclass(UniqueObjectMeta, UniqueObject)):
         else:
             return max(cls._instances.ids(context=context)) + 1
 
-    @classmethod
-    def check_duplicate(cls, name, id, context=None):
-        if context is None:
-            context = cls.get_default_context()
-
-        # use the typed parser to check the passed name and check for duplicates
-        name = cls.name.fparse(None, name)
-        if name in cls._instances.names(context=context):
-            if cls._instances.soft_checking:
-                DuplicateNameWarning(cls, name, context)
-            else:
-                raise DuplicateNameException(cls, name, context)
-
-        # check for auto_id
-        if id == cls.AUTO_ID:
-            id = cls.auto_id(name, context)
-
-        # use the typed parser to check the passed id, check for duplicates and store it
-        id = cls.id.fparse(None, id)
-        if id in cls._instances.ids(context=context):
-            if cls._instances.soft_checking:
-                DuplicateIdWarning(cls, id, context)
-            else:
-                raise DuplicateIdException(cls, id, context)
-        return (name, id, context)
-
     def __init__(self, name, id, context=None):
         super(UniqueObject, self).__init__()
 
-        # register empty attributes
-        self._name = None
-        self._id = None
-        self._context = None
-
-        # store name, id and context when duplicate check passed
-        self._name, self._id, self._context = self.check_duplicate(name, id, context=context)
+        self._name = self.name.fparse(None, name)
+        # check for auto_id
+        if id == self.AUTO_ID:
+            id = self.auto_id(name, context)
+        self._id = self.id.fparse(None, id)
+        # check if default context needed
+        if context is None:
+            context = self.get_default_context()
+        self._context = context
 
         # add the instance to the cache
         self._instances.add(self, context=self._context)
